@@ -56,8 +56,13 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Serve frontend static assets if client/dist exists (production mode)
-const clientDistPath = path.resolve(__dirname, '../../client/dist');
-if (fs.existsSync(clientDistPath)) {
+const possiblePaths = [
+  path.resolve(__dirname, '../../client/dist'),
+  path.resolve(process.cwd(), 'client/dist'),
+  path.resolve(__dirname, '../client/dist'),
+];
+const clientDistPath = possiblePaths.find((p) => fs.existsSync(p));
+if (clientDistPath) {
   app.use(express.static(clientDistPath));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api') || req.path.startsWith('/uploads') || req.path.startsWith('/socket.io')) {
