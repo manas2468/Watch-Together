@@ -1,5 +1,5 @@
-import React, { useRef, useEffect } from 'react';
-import { useWebRTC } from '../hooks/useWebRTC';
+import React, { useRef, useEffect, useCallback } from 'react';
+import { useWebRTCContext } from '../context/WebRTCContext';
 import { useRoom } from '../context/RoomContext';
 import { getInitials } from '../lib/colors';
 
@@ -11,12 +11,14 @@ export function VideoCallStrip({ isMobileCompact = false }: { isMobileCompact?: 
     isCameraOn,
     isMicOn,
     videoDevices,
+    isFloating,
+    setIsFloating,
     joinCall,
     leaveCall,
     toggleCamera,
     toggleMic,
     switchCamera,
-  } = useWebRTC();
+  } = useWebRTCContext();
   const { state } = useRoom();
   const [collapsed, setCollapsed] = React.useState(false);
 
@@ -24,7 +26,7 @@ export function VideoCallStrip({ isMobileCompact = false }: { isMobileCompact?: 
 
   if (!inCall && callMemberCount === 0) {
     return (
-      <div className="p-2.5 sm:p-3 border-b border-surface-800/40 bg-surface-900/40 backdrop-blur">
+      <div className="p-3 border-b border-surface-800/40 bg-surface-900/50 backdrop-blur">
         <div className="flex flex-col sm:flex-row items-center gap-2">
           <button
             onClick={() => joinCall(false)}
@@ -56,7 +58,7 @@ export function VideoCallStrip({ isMobileCompact = false }: { isMobileCompact?: 
   }
 
   return (
-    <div className="border-b border-surface-800/40 bg-surface-900/40 backdrop-blur">
+    <div className="border-b border-surface-800/40 bg-surface-900/50 backdrop-blur">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2">
         <div className="flex items-center gap-2">
@@ -69,6 +71,21 @@ export function VideoCallStrip({ isMobileCompact = false }: { isMobileCompact?: 
           </span>
         </div>
         <div className="flex items-center gap-1.5">
+          {inCall && (
+            <button
+              onClick={() => setIsFloating(!isFloating)}
+              className={`px-2 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 ${
+                isFloating
+                  ? 'bg-primary-500/20 text-primary-300 border border-primary-500/30'
+                  : 'bg-surface-800 text-surface-400 hover:text-white'
+              }`}
+              title="Toggle floating draggable faces window"
+            >
+              <span>🪟</span>
+              <span className="hidden sm:inline">{isFloating ? 'Floating On' : 'Float Window'}</span>
+            </button>
+          )}
+
           {!inCall && (
             <button
               onClick={() => joinCall(false)}
@@ -88,7 +105,7 @@ export function VideoCallStrip({ isMobileCompact = false }: { isMobileCompact?: 
         </div>
       </div>
 
-      {/* Video tiles */}
+      {/* Video tiles (docked view) */}
       {!collapsed && (
         <div className="px-3 pb-3">
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -112,7 +129,7 @@ export function VideoCallStrip({ isMobileCompact = false }: { isMobileCompact?: 
                   stream={peer.stream}
                   username={peer.username}
                   isLocal={false}
-                  isMuted={false}
+                  isMuted={member?.isMuted ?? false}
                   isCameraOff={!member?.cameraOn}
                   userColor={member?.color}
                 />
@@ -197,33 +214,42 @@ function VideoTile({
   isCameraOff: boolean;
   userColor?: string;
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const hasVideoTrack = stream && stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled;
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  const attachVideo = useCallback(
+    (el: HTMLVideoElement | null) => {
+      videoRef.current = el;
+      if (el && stream) {
+        el.srcObject = stream;
+        el.play().catch(() => {});
+      }
+    },
+    [stream]
+  );
 
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(() => {});
     }
-    return () => {
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-    };
   }, [stream]);
 
+  const hasVideoTrack = stream && stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled;
   const showVideo = hasVideoTrack && !isCameraOff;
 
   return (
     <div className="relative rounded-xl overflow-hidden bg-surface-900 border border-surface-800/60 aspect-video shadow-md flex items-center justify-center">
-      {stream && showVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted={isMuted}
-          className={`w-full h-full object-cover ${isLocal ? 'transform scale-x-[-1]' : ''}`}
-        />
-      ) : (
+      <video
+        ref={attachVideo}
+        autoPlay
+        playsInline
+        muted={isLocal}
+        className={`w-full h-full object-cover transition-opacity ${
+          showVideo ? 'opacity-100' : 'opacity-0 absolute inset-0'
+        } ${isLocal ? 'scale-x-[-1]' : ''}`}
+      />
+
+      {!showVideo && (
         <div className="flex flex-col items-center justify-center p-2">
           <div
             className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-inner mb-1"

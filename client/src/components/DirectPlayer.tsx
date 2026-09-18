@@ -3,10 +3,12 @@
 // ============================================================================
 // Detects CORS failures on load and shows a helpful error.
 // Integrates with the sync engine just like the YouTube player.
+// Guarded against browser unmount/unload pause event broadcasts.
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useSyncEngine, PlayerAPI } from '../hooks/useSyncEngine';
 import { useRoom } from '../context/RoomContext';
+import { useSocket } from '../context/SocketContext';
 import { formatTime } from '../lib/formatTime';
 
 interface DirectPlayerProps {
@@ -17,6 +19,8 @@ interface DirectPlayerProps {
 export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const isReadyRef = useRef(false);
+  const isUnloadingRef = useRef(false);
+
   const {
     registerPlayer,
     unregisterPlayer,
@@ -25,16 +29,31 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
     emitPlay,
     emitPause,
     emitSeek,
+    emitSeekRelative,
     reportBuffering,
     reportMediaEnded,
     beginRemoteUpdate,
   } = useSyncEngine();
+
   const { state, canControl } = useRoom();
+  const { socket } = useSocket();
+
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const [scrubTime, setScrubTime] = useState<number | null>(null);
+
+  // Prevent unload pause emissions
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      isUnloadingRef.current = true;
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
 
   // Register player API when video element is ready
   useEffect(() => {
@@ -42,6 +61,7 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
     if (!video) return;
 
     let destroyed = false;
+    isUnloadingRef.current = false;
 
     const handleCanPlay = () => {
       if (destroyed) return;
@@ -52,9 +72,13 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
       const api: PlayerAPI = {
         play: () => video.play().catch(() => {}),
         pause: () => video.pause(),
-        seekTo: (s: number) => { video.currentTime = s; },
+        seekTo: (s: number) => {
+          video.currentTime = s;
+        },
         getCurrentTime: () => video.currentTime,
-        setPlaybackRate: (r: number) => { video.playbackRate = r; },
+        setPlaybackRate: (r: number) => {
+          video.playbackRate = r;
+        },
         getPlaybackRate: () => video.playbackRate,
         isReady: () => isReadyRef.current && !video.error,
       };
@@ -75,21 +99,21 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
     };
 
     const handlePlay = () => {
-      if (destroyed || isEchoSuppressed()) return;
+      if (destroyed || isUnloadingRef.current || isEchoSuppressed()) return;
       if (canControl) emitPlay();
     };
 
     const handlePause = () => {
-      if (destroyed || isEchoSuppressed()) return;
+      if (destroyed || isUnloadingRef.current || isEchoSuppressed()) return;
       if (canControl && !video.ended) emitPause();
     };
 
     const handleSeeked = () => {
-      // We don't emit seek here — only from user-initiated seeks via our UI
+      // User-initiated seeks handled via UI commit
     };
 
     const handleTimeUpdate = () => {
-      if (destroyed) return;
+      if (destroyed || isScrubbing) return;
       setCurrentTime(video.currentTime);
     };
 
@@ -112,7 +136,6 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
       if (destroyed) return;
       setIsLoading(false);
 
-      // Detect CORS failure
       if (video.error) {
         const code = video.error.code;
         if (code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
@@ -146,6 +169,7 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
 
     return () => {
       destroyed = true;
+      isUnloadingRef.current = true;
       isReadyRef.current = false;
       unregisterPlayer();
       video.removeEventListener('canplay', handleCanPlay);
@@ -159,12 +183,20 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
       video.removeEventListener('error', handleError);
       video.removeEventListener('durationchange', handleDurationChange);
     };
-  }, [url]);
+  }, [url, isScrubbing]);
 
-  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (canControl) {
-      emitSeek(parseFloat(e.target.value));
+  const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setScrubTime(val);
+  };
+
+  const handleCommitSeek = () => {
+    if (scrubTime !== null && canControl) {
+      emitSeek(scrubTime);
+      setCurrentTime(scrubTime);
     }
+    setIsScrubbing(false);
+    setScrubTime(null);
   };
 
   const handleVolume = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -173,72 +205,151 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
     if (videoRef.current) videoRef.current.volume = vol;
   };
 
+  const togglePlay = () => {
+    if (!canControl) return;
+    if (state.playback.isPlaying) {
+      emitPause();
+    } else {
+      emitPlay();
+    }
+  };
+
+  const handleSkipNext = () => {
+    if (!socket || !state.roomId) return;
+    socket.emit('media:next', { roomId: state.roomId });
+  };
+
+  const activeDisplayTime = isScrubbing && scrubTime !== null ? scrubTime : currentTime;
+
   if (error) {
     return (
-      <div className="aspect-video bg-surface-900 rounded-lg flex items-center justify-center">
+      <div className="aspect-video bg-surface-950 rounded-xl flex items-center justify-center border border-surface-800/60 shadow-inner">
         <div className="text-center p-8 max-w-md">
           <div className="text-4xl mb-4">⚠️</div>
-          <p className="text-surface-300 text-sm">{error}</p>
+          <p className="text-surface-200 text-sm font-semibold mb-1">Playback Error</p>
+          <p className="text-surface-400 text-xs leading-relaxed">{error}</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="relative group">
-      <div className="aspect-video bg-black rounded-lg overflow-hidden">
-        <video
-          ref={videoRef}
-          src={url}
-          className="w-full h-full object-contain"
-          playsInline
-          crossOrigin="anonymous"
-          preload="auto"
-        />
-        {isLoading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-surface-900/80">
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent 
-                              rounded-full animate-spin" />
-              <span className="text-sm text-surface-400">Loading media…</span>
-            </div>
+    <div className="relative group aspect-video bg-black rounded-xl overflow-hidden select-none shadow-2xl">
+      <video
+        ref={videoRef}
+        src={url}
+        className="w-full h-full object-contain"
+        playsInline
+        crossOrigin="anonymous"
+        preload="auto"
+      />
+
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-surface-950/90 z-20 pointer-events-none">
+          <div className="flex flex-col items-center gap-3">
+            <div className="w-10 h-10 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs text-surface-400 font-medium">Loading video…</span>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Big center play button when paused */}
+      {!isLoading && !state.playback.isPlaying && (
+        <div
+          onClick={togglePlay}
+          className="absolute inset-0 flex items-center justify-center z-10 bg-black/40 backdrop-blur-[2px] transition-all cursor-pointer hover:bg-black/50 group/play"
+          title="Click to Play"
+        >
+          <button
+            type="button"
+            className="w-16 h-16 rounded-full bg-primary-600/90 hover:bg-primary-500 text-white flex items-center justify-center shadow-2xl shadow-primary-500/40 transform group-hover/play:scale-110 active:scale-95 transition-all"
+            aria-label="Play video"
+          >
+            <svg className="w-8 h-8 fill-current ml-1" viewBox="0 0 24 24">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Controls overlay */}
-      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent 
-                      px-4 py-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-        <input
-          type="range"
-          min={0}
-          max={duration || 100}
-          step={0.1}
-          value={currentTime}
-          onChange={handleSeek}
-          className="w-full h-1 appearance-none bg-surface-600/50 rounded-full cursor-pointer
-                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 
-                     [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full 
-                     [&::-webkit-slider-thumb]:bg-primary-500"
-          disabled={!canControl}
-          aria-label="Video progress"
-        />
-        <div className="flex items-center justify-between mt-2">
-          <div className="flex items-center gap-3">
+      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-4 py-3 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+        {/* Timeline Slider with smooth scrub preview */}
+        <div className="relative flex items-center mb-2.5">
+          <input
+            type="range"
+            min={0}
+            max={duration || 100}
+            step={0.1}
+            value={activeDisplayTime}
+            onMouseDown={() => setIsScrubbing(true)}
+            onTouchStart={() => setIsScrubbing(true)}
+            onChange={handleScrubberChange}
+            onMouseUp={handleCommitSeek}
+            onTouchEnd={handleCommitSeek}
+            className="w-full h-1.5 appearance-none bg-surface-700/60 rounded-full cursor-pointer transition-all
+                       hover:h-2 focus:outline-none
+                       [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 
+                       [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:rounded-full 
+                       [&::-webkit-slider-thumb]:bg-primary-500 [&::-webkit-slider-thumb]:shadow-lg
+                       [&::-webkit-slider-thumb]:hover:scale-125 transition-transform"
+            aria-label="Video progress"
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-3">
+          {/* Controls buttons */}
+          <div className="flex items-center gap-2">
             <button
-              onClick={() => (state.playback.isPlaying ? emitPause() : emitPlay())}
-              disabled={!canControl}
-              className="text-white hover:text-primary-400 disabled:opacity-50 transition-colors"
+              onClick={togglePlay}
+              className="p-1.5 rounded-lg hover:bg-white/10 text-white hover:text-primary-400 transition-colors text-base"
               aria-label={state.playback.isPlaying ? 'Pause' : 'Play'}
+              title={state.playback.isPlaying ? 'Pause (Space)' : 'Play (Space)'}
             >
               {state.playback.isPlaying ? '⏸' : '▶️'}
             </button>
-            <span className="text-xs text-surface-300 font-mono">
-              {formatTime(currentTime)} / {formatTime(duration)}
+
+            {/* Rewind -10s */}
+            <button
+              onClick={() => emitSeekRelative(-10)}
+              className="px-2 py-1 rounded-lg hover:bg-white/10 text-surface-300 hover:text-white transition-colors text-xs font-semibold flex items-center gap-1"
+              title="Rewind 10 seconds (← 5s)"
+            >
+              <span>⏪</span>
+              <span>-10s</span>
+            </button>
+
+            {/* Fast-Forward +10s */}
+            <button
+              onClick={() => emitSeekRelative(10)}
+              className="px-2 py-1 rounded-lg hover:bg-white/10 text-surface-300 hover:text-white transition-colors text-xs font-semibold flex items-center gap-1"
+              title="Forward 10 seconds (→ 5s)"
+            >
+              <span>+10s</span>
+              <span>⏩</span>
+            </button>
+
+            {/* Next Video button if queue has items */}
+            {state.queue.length > 0 && (
+              <button
+                onClick={handleSkipNext}
+                className="p-1.5 rounded-lg hover:bg-white/10 text-surface-300 hover:text-white transition-colors text-xs flex items-center gap-1 font-medium"
+                title="Skip to next video in queue"
+              >
+                <span>⏭ Next</span>
+              </button>
+            )}
+
+            <span className="text-xs text-surface-300 font-mono ml-2">
+              {formatTime(activeDisplayTime)} / {formatTime(duration)}
             </span>
           </div>
+
+          {/* Volume */}
           <div className="flex items-center gap-2">
-            <span className="text-xs text-surface-400">🔊</span>
+            <span className="text-xs text-surface-400">
+              {volume === 0 ? '🔇' : volume < 0.5 ? '🔉' : '🔊'}
+            </span>
             <input
               type="range"
               min={0}
@@ -246,10 +357,10 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
               step={0.01}
               value={volume}
               onChange={handleVolume}
-              className="w-20 h-1 appearance-none bg-surface-600/50 rounded-full cursor-pointer
+              className="w-20 sm:w-24 h-1 appearance-none bg-surface-700/60 rounded-full cursor-pointer
                          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 
                          [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:rounded-full 
-                         [&::-webkit-slider-thumb]:bg-white"
+                         [&::-webkit-slider-thumb]:bg-white hover:[&::-webkit-slider-thumb]:scale-110"
               aria-label="Volume"
             />
           </div>

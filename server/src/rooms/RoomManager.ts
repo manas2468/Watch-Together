@@ -67,7 +67,7 @@ export class RoomManager {
       id: roomId,
       name: name || `${username}'s Room`,
       hostId: hostSocketId,
-      everyoneCanControl: false,
+      everyoneCanControl: true,
       locked: false,
       ignoreSlowViewers: false,
       members: new Map([[hostSocketId, host]]),
@@ -152,6 +152,10 @@ export class RoomManager {
     const wasHost = member.isHost;
     room.members.delete(socketId);
     room.stalledClients.delete(socketId);
+    if (room.stalledClients.size === 0 && room.stallTimeout) {
+      clearTimeout(room.stallTimeout);
+      room.stallTimeout = null;
+    }
     room.skipVotes.delete(socketId);
     this.chatTimestamps.delete(socketId);
     this.reactionTimestamps.delete(socketId);
@@ -341,8 +345,7 @@ export class RoomManager {
   hasPlaybackPermission(roomId: string, socketId: string): boolean {
     const room = this.rooms.get(roomId);
     if (!room) return false;
-    if (room.everyoneCanControl) return room.members.has(socketId);
-    return room.hostId === socketId;
+    return room.members.has(socketId);
   }
 
   /**

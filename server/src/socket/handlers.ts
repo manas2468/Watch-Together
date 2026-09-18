@@ -475,6 +475,31 @@ export function registerSocketHandlers(io: Server, roomManager: RoomManager): vo
       }
     });
 
+    socket.on('media:next', (data: { roomId: string }) => {
+      try {
+        const { roomId } = data || {};
+        if (!roomId || !roomManager.hasPlaybackPermission(roomId, socket.id)) return;
+
+        const result = roomManager.advanceQueue(roomId);
+        if (result) {
+          io.to(roomId).emit('media:changed', {
+            currentItem: result.item,
+            playback: result.playback,
+          });
+          io.to(roomId).emit('queue:update', {
+            queue: roomManager.getRoom(roomId)?.queue || [],
+          });
+          if (result.item) {
+            const room = roomManager.getRoom(roomId);
+            const lastMsg = room?.messages.slice(-1)[0];
+            if (lastMsg?.isSystem) io.to(roomId).emit('chat:message', lastMsg);
+          }
+        }
+      } catch (err) {
+        console.error('[Socket] media:next error:', err);
+      }
+    });
+
     socket.on('queue:add', (data: { roomId: string; item: MediaItem }) => {
       try {
         const { roomId, item } = data || {};

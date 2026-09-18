@@ -402,9 +402,9 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
     [socket, state.roomId]
   );
 
-  // Computed values
+  // Computed values: All members can control playback
   const isHost = state.mySocketId === state.hostId;
-  const canControl = isHost || state.everyoneCanControl;
+  const canControl = true;
 
   // Cleanup toast timeouts on unmount
   useEffect(() => {

@@ -231,9 +231,21 @@ export function useSyncEngine() {
   const emitSeek = useCallback(
     (positionSec: number) => {
       if (!socket || !roomIdRef.current || !canControl) return;
-      socket.emit('playback:seek', { roomId: roomIdRef.current, positionSec });
+      socket.emit('playback:seek', { roomId: roomIdRef.current, positionSec: Math.max(0, positionSec) });
     },
     [socket, canControl]
+  );
+
+  const emitSeekRelative = useCallback(
+    (deltaSec: number) => {
+      if (!socket || !roomIdRef.current || !canControl) return;
+      const current = playerRef.current?.isReady()
+        ? playerRef.current.getCurrentTime()
+        : getExpectedPosition();
+      const target = Math.max(0, current + deltaSec);
+      socket.emit('playback:seek', { roomId: roomIdRef.current, positionSec: target });
+    },
+    [socket, canControl, getExpectedPosition]
   );
 
   // ===== Buffering Coordination =====
@@ -291,6 +303,7 @@ export function useSyncEngine() {
     emitPlay,
     emitPause,
     emitSeek,
+    emitSeekRelative,
     reportBuffering,
     reportMediaEnded,
     beginRemoteUpdate,

@@ -2,12 +2,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoom } from '../context/RoomContext';
 import { useSocket } from '../context/SocketContext';
+import { useWebRTCContext } from '../context/WebRTCContext';
 import { RoomHeader } from './RoomHeader';
 import { Player } from './Player';
 import { ChatPanel } from './ChatPanel';
 import { MemberList } from './MemberList';
 import { QueuePanel } from './QueuePanel';
 import { VideoCallStrip } from './VideoCallStrip';
+import { FloatingVideoGrid } from './FloatingVideoGrid';
 import { Reactions } from './Reactions';
 import { ShareDialog } from './ShareDialog';
 import { UsernameModal } from './UsernameModal';
@@ -21,6 +23,7 @@ export function RoomPage() {
   const navigate = useNavigate();
   const { state, joinRoom, sendReaction, canControl } = useRoom();
   const { socket, isConnected } = useSocket();
+  const { inCall, isFloating, setIsFloating, joinCall } = useWebRTCContext();
 
   const [activeTab, setActiveTab] = useState<TabType>('chat');
   const [showShare, setShowShare] = useState(false);
@@ -31,14 +34,13 @@ export function RoomPage() {
 
   const storedUsername = localStorage.getItem('wt-username');
 
-  // Handle joining room on page mount/url change
+  // Handle joining room on page mount / url change
   useEffect(() => {
     if (!roomId) {
       navigate('/', { replace: true });
       return;
     }
 
-    // Already in this room
     if (state.roomId === roomId.toUpperCase()) {
       return;
     }
@@ -76,10 +78,16 @@ export function RoomPage() {
     }
   };
 
+  // Compute live playback position from synchronized clock
+  const getCurrentLivePos = useCallback(() => {
+    if (!state.playback.isPlaying) return state.playback.positionSec;
+    const elapsed = (Date.now() - state.playback.lastUpdatedAt) / 1000;
+    return state.playback.positionSec + elapsed;
+  }, [state.playback]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't trigger if user is typing in an input/textarea/editable
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -95,22 +103,19 @@ export function RoomPage() {
         e.preventDefault();
         if (canControl && socket && state.roomId && state.currentItem) {
           if (state.playback.isPlaying) {
-            socket.emit('playback:pause', {
-              roomId: state.roomId,
-            });
+            socket.emit('playback:pause', { roomId: state.roomId });
           } else {
-            socket.emit('playback:play', {
-              roomId: state.roomId,
-            });
+            socket.emit('playback:play', { roomId: state.roomId });
           }
         }
       }
 
-      // Seek -5s
+      // Seek -5s from CURRENT LIVE POSITION
       if (e.code === 'ArrowLeft') {
         e.preventDefault();
         if (canControl && socket && state.roomId && state.currentItem) {
-          const newPos = Math.max(0, state.playback.positionSec - 5);
+          const currentPos = getCurrentLivePos();
+          const newPos = Math.max(0, currentPos - 5);
           socket.emit('playback:seek', {
             roomId: state.roomId,
             positionSec: newPos,
@@ -118,11 +123,12 @@ export function RoomPage() {
         }
       }
 
-      // Seek +5s
+      // Seek +5s from CURRENT LIVE POSITION
       if (e.code === 'ArrowRight') {
         e.preventDefault();
         if (canControl && socket && state.roomId && state.currentItem) {
-          const newPos = state.playback.positionSec + 5;
+          const currentPos = getCurrentLivePos();
+          const newPos = currentPos + 5;
           socket.emit('playback:seek', {
             roomId: state.roomId,
             positionSec: newPos,
@@ -158,13 +164,13 @@ export function RoomPage() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [canControl, socket, state.roomId, state.currentItem, state.playback, sendReaction]);
+  }, [canControl, socket, state.roomId, state.currentItem, getCurrentLivePos, sendReaction]);
 
   if (joining) {
     return (
       <div className="h-screen w-screen flex flex-col items-center justify-center bg-surface-950 text-white">
         <div className="w-12 h-12 border-4 border-primary-500/30 border-t-primary-500 rounded-full animate-spin mb-4" />
-        <h2 className="text-xl font-semibold">Joining Room...</h2>
+        <h2 className="text-xl font-semibold">Entering Watch Room...</h2>
         <p className="text-surface-400 text-sm mt-1 font-mono">{roomId?.toUpperCase()}</p>
       </div>
     );
@@ -174,19 +180,19 @@ export function RoomPage() {
 
   return (
     <div className="h-[100dvh] w-screen flex flex-col bg-surface-950 text-white overflow-hidden select-none">
-      {/* Top Header */}
+      {/* Top Navigation Header */}
       <RoomHeader />
 
-      {/* Main Container */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden relative">
-        {/* Left / Top Area: Video Player & Controls */}
-        <div className="flex flex-col lg:flex-1 min-w-0 bg-surface-950/70 overflow-y-auto lg:overflow-y-auto flex-shrink-0 lg:flex-shrink">
-          {/* Video Container (Aspect-video, sticky on mobile so it remains in view) */}
+      {/* Main Content Layout */}
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden relative">
+        {/* Left / Top Area: Video Player & Action Bar */}
+        <div className="flex flex-col lg:flex-1 min-w-0 bg-surface-950 flex-shrink-0 lg:flex-shrink lg:overflow-y-auto">
+          {/* Video Container */}
           <div
             ref={videoContainerRef}
-            className={`relative flex items-center justify-center bg-black overflow-hidden flex-shrink-0 ${
+            className={`relative flex items-center justify-center bg-black overflow-hidden flex-shrink-0 transition-all ${
               theaterMode
-                ? 'w-full max-h-[85vh] aspect-video mx-auto'
+                ? 'w-full max-h-[85vh] aspect-video mx-auto shadow-2xl'
                 : 'w-full aspect-video max-h-[45vh] lg:max-h-none'
             }`}
           >
@@ -195,15 +201,15 @@ export function RoomPage() {
           </div>
 
           {/* Quick Reaction & Player Utility Bar */}
-          <div className="px-3 py-2 sm:px-4 sm:py-2.5 flex items-center justify-between border-b border-surface-800/40 bg-surface-900/60 backdrop-blur flex-shrink-0">
+          <div className="px-3 py-2 sm:px-4 sm:py-2.5 flex items-center justify-between border-b border-surface-800/60 bg-surface-900/80 backdrop-blur flex-shrink-0">
             {/* Quick emoji reactions */}
-            <div className="flex items-center gap-1 sm:gap-2 overflow-x-auto no-scrollbar py-0.5">
+            <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar py-0.5">
               <span className="text-xs text-surface-400 font-medium hidden sm:inline mr-1">React:</span>
               {QUICK_REACTIONS.map((emoji, idx) => (
                 <button
                   key={emoji}
                   onClick={() => sendReaction(emoji)}
-                  className="px-2 py-1 sm:px-2.5 sm:py-1 rounded-lg bg-surface-800/50 hover:bg-surface-700/80 active:scale-90 transition-all text-sm sm:text-base flex-shrink-0"
+                  className="px-2 py-1 sm:px-2.5 sm:py-1 rounded-xl bg-surface-800/60 hover:bg-surface-700/90 active:scale-90 transition-all text-sm sm:text-base flex-shrink-0 border border-surface-700/40"
                   title={`Send ${emoji} (Key: ${idx + 1})`}
                 >
                   {emoji}
@@ -212,13 +218,38 @@ export function RoomPage() {
             </div>
 
             {/* Utility buttons */}
-            <div className="flex items-center gap-1 sm:gap-2 flex-shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+              {/* Floating Faces Toggle */}
+              {inCall ? (
+                <button
+                  onClick={() => setIsFloating(!isFloating)}
+                  className={`px-2.5 py-1.5 rounded-xl text-xs font-medium transition-all flex items-center gap-1.5 border ${
+                    isFloating
+                      ? 'bg-primary-500/20 text-primary-300 border-primary-500/40 shadow-sm'
+                      : 'bg-surface-800/80 text-surface-300 hover:text-white border-surface-700/50'
+                  }`}
+                  title="Toggle floating draggable faces window"
+                >
+                  <span>🪟</span>
+                  <span className="hidden sm:inline font-semibold">Floating Faces</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => joinCall(false)}
+                  className="px-2.5 py-1.5 rounded-xl text-xs font-semibold text-accent-emerald bg-accent-emerald/15 hover:bg-accent-emerald/25 border border-accent-emerald/30 transition-all flex items-center gap-1"
+                  title="Join camera call"
+                >
+                  <span>📹</span>
+                  <span className="hidden sm:inline">Join Call</span>
+                </button>
+              )}
+
               <button
                 onClick={() => setTheaterMode((prev) => !prev)}
-                className={`p-1.5 rounded-lg text-xs transition-colors hidden sm:block ${
+                className={`p-1.5 rounded-xl text-xs transition-colors hidden sm:block border ${
                   theaterMode
-                    ? 'bg-primary-600/20 text-primary-400 border border-primary-500/30'
-                    : 'text-surface-400 hover:text-white hover:bg-surface-800/60'
+                    ? 'bg-primary-600/20 text-primary-400 border-primary-500/40'
+                    : 'text-surface-400 hover:text-white hover:bg-surface-800/60 border-surface-700/40'
                 }`}
                 title="Theater mode (T)"
               >
@@ -237,7 +268,7 @@ export function RoomPage() {
                     }
                   }
                 }}
-                className="p-1.5 rounded-lg text-surface-400 hover:text-white hover:bg-surface-800/60 transition-colors text-xs"
+                className="p-1.5 rounded-xl text-surface-400 hover:text-white hover:bg-surface-800/60 border border-surface-700/40 transition-colors text-xs"
                 title="Fullscreen (F)"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -247,8 +278,8 @@ export function RoomPage() {
 
               <button
                 onClick={() => setShowShare(true)}
-                className="p-1.5 rounded-lg text-surface-400 hover:text-white hover:bg-surface-800/60 transition-colors text-xs"
-                title="Share Room & QR code"
+                className="p-1.5 rounded-xl text-surface-400 hover:text-white hover:bg-surface-800/60 border border-surface-700/40 transition-colors text-xs"
+                title="Share Room"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
@@ -257,10 +288,10 @@ export function RoomPage() {
             </div>
           </div>
 
-          {/* Under Player Stream Details (Visible on Desktop) */}
+          {/* Under-Player Stream Info Card */}
           <div className="hidden lg:block p-4 space-y-3">
             {state.currentItem && (
-              <div className="glass rounded-xl p-4 border border-surface-800/40 flex flex-row items-center justify-between gap-3">
+              <div className="bg-surface-900/60 rounded-2xl p-4 border border-surface-800/60 flex flex-row items-center justify-between gap-3 shadow-md">
                 <div className="min-w-0">
                   <h2 className="text-base font-semibold text-white truncate">
                     {state.currentItem.title || 'Untitled Stream'}
@@ -270,43 +301,41 @@ export function RoomPage() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${
-                    canControl ? 'bg-primary-500/20 text-primary-300 border border-primary-500/30' : 'bg-surface-800 text-surface-400'
-                  }`}>
-                    {canControl ? '🎮 Playback Control' : '👀 Viewer Only'}
+                  <span className="px-3 py-1 rounded-full text-xs font-medium bg-primary-500/20 text-primary-300 border border-primary-500/30">
+                    🎮 Everyone Can Control
                   </span>
                 </div>
               </div>
             )}
 
             {/* Keyboard shortcut hints */}
-            <div className="rounded-xl bg-surface-900/40 border border-surface-800/40 p-3 flex flex-wrap items-center justify-between gap-2 text-xs text-surface-400">
+            <div className="rounded-2xl bg-surface-900/40 border border-surface-800/40 p-3 flex flex-wrap items-center justify-between gap-2 text-xs text-surface-400">
               <div className="flex items-center gap-3 flex-wrap">
                 <span>⚡ Shortcuts:</span>
-                <span className="font-mono bg-surface-800/80 px-1.5 py-0.5 rounded text-surface-300">Space</span> Play/Pause
-                <span className="font-mono bg-surface-800/80 px-1.5 py-0.5 rounded text-surface-300">← / →</span> Seek 5s
-                <span className="font-mono bg-surface-800/80 px-1.5 py-0.5 rounded text-surface-300">F</span> Fullscreen
-                <span className="font-mono bg-surface-800/80 px-1.5 py-0.5 rounded text-surface-300">1-6</span> Reactions
+                <span className="font-mono bg-surface-800 px-2 py-0.5 rounded text-surface-200">Space</span> Play/Pause
+                <span className="font-mono bg-surface-800 px-2 py-0.5 rounded text-surface-200">← / →</span> Seek 5s
+                <span className="font-mono bg-surface-800 px-2 py-0.5 rounded text-surface-200">F</span> Fullscreen
+                <span className="font-mono bg-surface-800 px-2 py-0.5 rounded text-surface-200">1-6</span> Reactions
               </div>
             </div>
           </div>
         </div>
 
-        {/* Sidebar / Bottom Area on Mobile */}
-        <div className="flex-1 lg:flex-initial lg:w-80 xl:w-96 flex flex-col border-t lg:border-t-0 lg:border-l border-surface-800/50 bg-surface-900/70 backdrop-blur overflow-hidden min-h-0">
-          {/* Integrated WebRTC Video Call Strip at the top of sidebar (desktop only; on mobile it's an accessible tab) */}
+        {/* Sidebar (Tabs: Chat, Queue, Call, Members) */}
+        <div className="flex-1 lg:flex-initial lg:w-80 xl:w-96 flex flex-col border-t lg:border-t-0 lg:border-l border-surface-800/60 bg-surface-900/60 backdrop-blur overflow-hidden min-h-0">
+          {/* Integrated WebRTC Video Call Strip at top of sidebar (desktop only) */}
           <div className="hidden lg:block">
             <VideoCallStrip />
           </div>
 
           {/* Navigation Tabs Header */}
-          <div className="flex items-center border-b border-surface-800/50 px-2 pt-1.5 bg-surface-900/90 flex-shrink-0">
+          <div className="flex items-center border-b border-surface-800/60 px-2 pt-1.5 bg-surface-900/90 flex-shrink-0">
             {/* Chat Tab */}
             <button
               onClick={() => setActiveTab('chat')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 ${
+              className={`flex-1 py-2.5 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 ${
                 activeTab === 'chat'
-                  ? 'border-primary-500 text-primary-400'
+                  ? 'border-primary-500 text-primary-400 font-bold'
                   : 'border-transparent text-surface-400 hover:text-surface-200'
               }`}
             >
@@ -322,9 +351,9 @@ export function RoomPage() {
             {/* Queue & Search Tab */}
             <button
               onClick={() => setActiveTab('queue')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 ${
+              className={`flex-1 py-2.5 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 ${
                 activeTab === 'queue'
-                  ? 'border-primary-500 text-primary-400'
+                  ? 'border-primary-500 text-primary-400 font-bold'
                   : 'border-transparent text-surface-400 hover:text-surface-200'
               }`}
             >
@@ -340,9 +369,9 @@ export function RoomPage() {
             {/* Mobile Call Tab (Visible on mobile/tablet) */}
             <button
               onClick={() => setActiveTab('call')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 lg:hidden ${
+              className={`flex-1 py-2.5 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 lg:hidden ${
                 activeTab === 'call'
-                  ? 'border-primary-500 text-primary-400'
+                  ? 'border-primary-500 text-primary-400 font-bold'
                   : 'border-transparent text-surface-400 hover:text-surface-200'
               }`}
             >
@@ -356,9 +385,9 @@ export function RoomPage() {
             {/* Members Tab */}
             <button
               onClick={() => setActiveTab('members')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 ${
+              className={`flex-1 py-2.5 text-xs font-semibold border-b-2 transition-all relative flex items-center justify-center gap-1.5 ${
                 activeTab === 'members'
-                  ? 'border-primary-500 text-primary-400'
+                  ? 'border-primary-500 text-primary-400 font-bold'
                   : 'border-transparent text-surface-400 hover:text-surface-200'
               }`}
             >
@@ -370,22 +399,22 @@ export function RoomPage() {
             </button>
           </div>
 
-          {/* Tab Content Area */}
+          {/* Tab Content Area (WebRTC does NOT unmount when switching tabs) */}
           <div className="flex-1 overflow-hidden relative flex flex-col min-h-0">
             {activeTab === 'chat' && <ChatPanel />}
             {activeTab === 'queue' && <QueuePanel />}
             {activeTab === 'call' && (
               <div className="p-3 overflow-y-auto h-full space-y-3">
                 <VideoCallStrip />
-                <div className="p-3 rounded-xl bg-surface-800/40 border border-surface-700/40 text-xs text-surface-300 space-y-2">
+                <div className="p-3.5 rounded-2xl bg-surface-800/40 border border-surface-700/40 text-xs text-surface-300 space-y-2">
                   <h4 className="font-semibold text-white flex items-center gap-1.5">
-                    <span>💡</span> Calling on Mobile
+                    <span>💡</span> Calling Features
                   </h4>
                   <p className="text-surface-400 text-[11px] leading-relaxed">
-                    Camera & microphone require a secure context (<span className="text-primary-300 font-mono">HTTPS</span> or <span className="text-primary-300 font-mono">localhost</span>).
+                    You can switch to <strong>Chat</strong>, <strong>Queue</strong>, or any other tab — your call and camera will <strong>stay connected</strong> without dropping!
                   </p>
                   <p className="text-surface-400 text-[11px] leading-relaxed">
-                    If you don't have a camera or it's blocked, you can join with <strong>Voice Only</strong> to speak with everyone in the room!
+                    Tap <strong>🪟 Floating Faces</strong> anytime to see everyone in a draggable floating window while you chat.
                   </p>
                 </div>
               </div>
@@ -394,6 +423,9 @@ export function RoomPage() {
           </div>
         </div>
       </div>
+
+      {/* Draggable Floating Video Grid for all faces */}
+      <FloatingVideoGrid />
 
       {/* Floating Toast Notification Container */}
       <div className="fixed bottom-4 left-4 right-4 sm:right-auto z-50 flex flex-col gap-2 pointer-events-none max-w-sm w-full mx-auto sm:mx-0">
