@@ -356,16 +356,21 @@ export class RoomManager {
     const room = this.rooms.get(roomId);
     if (!room) return null;
 
-    // If transitioning from playing to paused (or vice versa), freeze position first
-    if (updates.isPlaying !== undefined && room.playback.isPlaying && !updates.isPlaying) {
-      const elapsed = (Date.now() - room.playback.lastUpdatedAt) / 1000;
-      room.playback.positionSec += elapsed;
+    const now = Date.now();
+    let currentPos = room.playback.positionSec;
+    if (room.playback.isPlaying) {
+      const elapsed = Math.max(0, (now - room.playback.lastUpdatedAt) / 1000);
+      currentPos += elapsed;
     }
+
+    // If positionSec is explicitly passed (e.g. on seek), use it; otherwise preserve current live position
+    const newPos = updates.positionSec !== undefined ? updates.positionSec : currentPos;
 
     room.playback = {
       ...room.playback,
       ...updates,
-      lastUpdatedAt: Date.now(),
+      positionSec: Math.max(0, newPos),
+      lastUpdatedAt: now,
     };
 
     return { ...room.playback };

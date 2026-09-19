@@ -100,12 +100,12 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
 
     const handlePlay = () => {
       if (destroyed || isUnloadingRef.current || isEchoSuppressed()) return;
-      if (canControl) emitPlay();
+      if (canControl && !state.playback.isPlaying) emitPlay();
     };
 
     const handlePause = () => {
       if (destroyed || isUnloadingRef.current || isEchoSuppressed()) return;
-      if (canControl && !video.ended) emitPause();
+      if (canControl && !video.ended && state.playback.isPlaying) emitPause();
     };
 
     const handleSeeked = () => {
@@ -185,19 +185,74 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
     };
   }, [url, isScrubbing]);
 
+  const isScrubbingRef = useRef(false);
+  const scrubTimeRef = useRef<number | null>(null);
+  const [showControls, setShowControls] = useState(true);
+  const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetControlsTimeout = useCallback(() => {
+    setShowControls(true);
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    if (state.playback.isPlaying && !isScrubbingRef.current) {
+      controlsTimeoutRef.current = setTimeout(() => {
+        if (state.playback.isPlaying && !isScrubbingRef.current) {
+          setShowControls(false);
+        }
+      }, 2500);
+    }
+  }, [state.playback.isPlaying]);
+
+  useEffect(() => {
+    if (!state.playback.isPlaying) {
+      setShowControls(true);
+      if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+    } else {
+      resetControlsTimeout();
+    }
+  }, [state.playback.isPlaying, resetControlsTimeout]);
+
   const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
     setScrubTime(val);
+    scrubTimeRef.current = val;
+    resetControlsTimeout();
   };
 
-  const handleCommitSeek = () => {
-    if (scrubTime !== null && canControl) {
-      emitSeek(scrubTime);
-      setCurrentTime(scrubTime);
+  const startScrub = () => {
+    setIsScrubbing(true);
+    isScrubbingRef.current = true;
+    setShowControls(true);
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current);
+  };
+
+  const commitSeek = useCallback(() => {
+    if (!isScrubbingRef.current) return;
+    const target = scrubTimeRef.current;
+    if (target !== null && canControl) {
+      emitSeek(target);
+      setCurrentTime(target);
     }
     setIsScrubbing(false);
+    isScrubbingRef.current = false;
     setScrubTime(null);
-  };
+    scrubTimeRef.current = null;
+    resetControlsTimeout();
+  }, [canControl, emitSeek, resetControlsTimeout]);
+
+  // Window-level release so scrubbing NEVER gets stuck if released outside the slider
+  useEffect(() => {
+    const handleGlobalRelease = () => {
+      if (isScrubbingRef.current) {
+        commitSeek();
+      }
+    };
+    window.addEventListener('mouseup', handleGlobalRelease);
+    window.addEventListener('touchend', handleGlobalRelease);
+    return () => {
+      window.removeEventListener('mouseup', handleGlobalRelease);
+      window.removeEventListener('touchend', handleGlobalRelease);
+    };
+  }, [commitSeek]);
 
   const handleVolume = (e: React.ChangeEvent<HTMLInputElement>) => {
     const vol = parseFloat(e.target.value);
@@ -234,7 +289,18 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
   }
 
   return (
-    <div className="relative group aspect-video bg-black rounded-xl overflow-hidden select-none shadow-2xl">
+    <div
+      onMouseMove={resetControlsTimeout}
+      onTouchStart={resetControlsTimeout}
+      onMouseLeave={() => {
+        if (state.playback.isPlaying && !isScrubbingRef.current) {
+          setShowControls(false);
+        }
+      }}
+      className={`relative group aspect-video bg-black rounded-xl overflow-hidden select-none shadow-2xl transition-all ${
+        showControls ? 'cursor-default' : 'cursor-none'
+      }`}
+    >
       <video
         ref={videoRef}
         src={url}
@@ -272,8 +338,12 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
         </div>
       )}
 
-      {/* Controls overlay */}
-      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-4 py-3 z-30 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+      {/* Controls overlay: smoothly fades out after 2.5s of inactivity */}
+      <div
+        className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-4 py-3 z-30 transition-opacity duration-300 ${
+          showControls ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+        }`}
+      >
         {/* Timeline Slider with smooth scrub preview */}
         <div className="relative flex items-center mb-2.5">
           <input
@@ -282,11 +352,11 @@ export function DirectPlayer({ url, onReady }: DirectPlayerProps) {
             max={duration || 100}
             step={0.1}
             value={activeDisplayTime}
-            onMouseDown={() => setIsScrubbing(true)}
-            onTouchStart={() => setIsScrubbing(true)}
+            onMouseDown={startScrub}
+            onTouchStart={startScrub}
             onChange={handleScrubberChange}
-            onMouseUp={handleCommitSeek}
-            onTouchEnd={handleCommitSeek}
+            onMouseUp={commitSeek}
+            onTouchEnd={commitSeek}
             className="w-full h-1.5 appearance-none bg-surface-700/60 rounded-full cursor-pointer transition-all
                        hover:h-2 focus:outline-none
                        [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 

@@ -329,6 +329,12 @@ export function registerSocketHandlers(io: Server, roomManager: RoomManager): vo
           return;
         }
 
+        const room = roomManager.getRoom(roomId);
+        if (room && room.playback.isPlaying) {
+          // Already playing, avoid redundant echo
+          return;
+        }
+
         const playback = roomManager.updatePlayback(roomId, { isPlaying: true });
         if (playback) {
           io.to(roomId).emit('playback:update', { playback, reason: 'play' });
@@ -344,6 +350,12 @@ export function registerSocketHandlers(io: Server, roomManager: RoomManager): vo
         if (!roomId) return;
         if (!roomManager.hasPlaybackPermission(roomId, socket.id)) {
           socket.emit('toast', { message: 'Only the host can control playback.', type: 'error' });
+          return;
+        }
+
+        const room = roomManager.getRoom(roomId);
+        if (room && !room.playback.isPlaying) {
+          // Already paused, avoid redundant echo
           return;
         }
 
@@ -595,12 +607,16 @@ export function registerSocketHandlers(io: Server, roomManager: RoomManager): vo
     // Pure relay — the server just forwards offer/answer/ICE between peers.
     // All payloads carry {fromId, toId} for targeted delivery.
 
-    socket.on('rtc:join-call', (data: { roomId: string }) => {
+    socket.on('rtc:join-call', (data: { roomId: string; cameraOn?: boolean; isMuted?: boolean }) => {
       try {
-        const { roomId } = data || {};
+        const { roomId, cameraOn, isMuted } = data || {};
         if (!roomId) return;
 
-        const member = roomManager.updateMember(roomId, socket.id, { inCall: true });
+        const member = roomManager.updateMember(roomId, socket.id, {
+          inCall: true,
+          cameraOn: cameraOn !== undefined ? cameraOn : true,
+          isMuted: isMuted !== undefined ? isMuted : false,
+        });
         if (!member) return;
 
         // Notify all other call participants

@@ -85,12 +85,12 @@ export function useSyncEngine() {
   // Set the flag before programmatic player control, clear after 300ms.
   // Player event handlers must check this flag and return immediately if true.
 
-  const beginRemoteUpdate = useCallback(() => {
+  const beginRemoteUpdate = useCallback((durationMs = 800) => {
     isApplyingRemoteUpdateRef.current = true;
     if (echoSuppressionTimerRef.current) clearTimeout(echoSuppressionTimerRef.current);
     echoSuppressionTimerRef.current = setTimeout(() => {
       isApplyingRemoteUpdateRef.current = false;
-    }, 300);
+    }, durationMs);
   }, []);
 
   /**
@@ -130,9 +130,12 @@ export function useSyncEngine() {
       const currentPos = player.getCurrentTime();
       const drift = Math.abs(currentPos - targetPos);
 
-      // Always seek on explicit seek or large drift
+      // Always seek on explicit seek or large drift, with extended suppression for buffering
       if (reason === 'seek' || drift > 1) {
+        beginRemoteUpdate(1500);
         player.seekTo(targetPos);
+      } else {
+        beginRemoteUpdate(800);
       }
 
       if (playback.isPlaying) {
@@ -220,11 +223,13 @@ export function useSyncEngine() {
 
   const emitPlay = useCallback(() => {
     if (!socket || !roomIdRef.current || !canControl) return;
+    if (playbackRef.current.isPlaying) return; // already playing
     socket.emit('playback:play', { roomId: roomIdRef.current });
   }, [socket, canControl]);
 
   const emitPause = useCallback(() => {
     if (!socket || !roomIdRef.current || !canControl) return;
+    if (!playbackRef.current.isPlaying) return; // already paused
     socket.emit('playback:pause', { roomId: roomIdRef.current });
   }, [socket, canControl]);
 

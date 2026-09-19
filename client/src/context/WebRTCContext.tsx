@@ -14,6 +14,9 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' },
 ];
 
 interface PeerConnection {
@@ -93,6 +96,7 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
   const [isMinimized, setIsMinimized] = useState(false);
 
   const peersRef = useRef<Map<string, PeerConnection>>(new Map());
+  const earlyCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
   const inCallRef = useRef(false);
 
@@ -138,6 +142,7 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
   );
 
   const removePeer = useCallback((peerId: string) => {
+    earlyCandidatesRef.current.delete(peerId);
     const peerConn = peersRef.current.get(peerId);
     if (peerConn) {
       try {
@@ -159,13 +164,16 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
         } catch {}
       }
 
+      const early = earlyCandidatesRef.current.get(peerId) || [];
+      earlyCandidatesRef.current.delete(peerId);
+
       const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
       const peerConn: PeerConnection = {
         pc,
         peerId,
         username: peerUsername,
         stream: null,
-        pendingCandidates: [],
+        pendingCandidates: [...early],
         isRemoteDescriptionSet: false,
       };
 
@@ -188,6 +196,11 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
         } else {
           peerConn.stream = stream;
         }
+
+        // When track un-mutes (RTP video packets start flowing), force state update
+        event.track.onunmute = () => {
+          setPeerStreams((prev) => [...prev]);
+        };
 
         const currentStream = stream;
         setPeerStreams((prev) => {
@@ -307,7 +320,11 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
 
       await refreshDevices();
 
-      socket.emit('rtc:join-call', { roomId: state.roomId });
+      socket.emit('rtc:join-call', {
+        roomId: state.roomId,
+        cameraOn: cameraActive,
+        isMuted: !micActive,
+      });
       socket.emit('member:update', {
         roomId: state.roomId,
         updates: { inCall: true, cameraOn: cameraActive, isMuted: !micActive },
@@ -345,16 +362,52 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
   }, [socket, state.roomId, removePeer]);
 
   // Toggle camera
-  const toggleCamera = useCallback(() => {
-    if (!localStreamRef.current || !socket || !state.roomId) return;
+  const toggleCamera = useCallback(async () => {
+    if (!socket || !state.roomId) return;
+
+    if (!localStreamRef.current) return;
+
     const videoTracks = localStreamRef.current.getVideoTracks();
+
+    // If no video tracks exist yet (e.g. joined with voice only), acquire camera track
+    if (videoTracks.length === 0) {
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        const newTrack = newStream.getVideoTracks()[0];
+        if (newTrack) {
+          localStreamRef.current.addTrack(newTrack);
+          setIsCameraOn(true);
+          setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+
+          // Add video track to all active peer connections
+          for (const [, peerConn] of peersRef.current) {
+            peerConn.pc.addTrack(newTrack, localStreamRef.current);
+            if (socket.id! < peerConn.peerId) {
+              initiateOffer(peerConn);
+            }
+          }
+
+          socket.emit('member:update', { roomId: state.roomId, updates: { cameraOn: true } });
+        }
+      } catch (err) {
+        console.error('[WebRTC] Failed to acquire camera on toggle:', err);
+        addToast('Could not access camera. Please check camera permissions.', 'error');
+      }
+      return;
+    }
+
+    // Toggle existing track enabled state
     const newState = !isCameraOn;
     for (const track of videoTracks) {
       track.enabled = newState;
     }
     setIsCameraOn(newState);
+    setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
     socket.emit('member:update', { roomId: state.roomId, updates: { cameraOn: newState } });
-  }, [isCameraOn, socket, state.roomId]);
+  }, [isCameraOn, socket, state.roomId, addToast, initiateOffer]);
 
   // Toggle mic
   const toggleMic = useCallback(() => {
@@ -469,7 +522,13 @@ export function WebRTCProvider({ children }: { children: React.ReactNode }) {
     const handleIce = async (data: { fromId: string; candidate: RTCIceCandidateInit }) => {
       try {
         const peerConn = peersRef.current.get(data.fromId);
-        if (!peerConn) return;
+        if (!peerConn) {
+          // Peer connection not yet created: buffer candidate so it is never dropped
+          const queue = earlyCandidatesRef.current.get(data.fromId) || [];
+          queue.push(data.candidate);
+          earlyCandidatesRef.current.set(data.fromId, queue);
+          return;
+        }
         if (!peerConn.isRemoteDescriptionSet) {
           peerConn.pendingCandidates.push(data.candidate);
         } else {

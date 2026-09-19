@@ -215,27 +215,83 @@ function VideoTile({
   userColor?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [hasAutoplayBlocked, setHasAutoplayBlocked] = React.useState(false);
+  const [, setTrackTick] = React.useState(0);
+
+  const playVideo = useCallback(
+    (videoEl: HTMLVideoElement) => {
+      if (!stream) return;
+      videoEl.srcObject = stream;
+      const playPromise = videoEl.play();
+      if (playPromise !== undefined) {
+        playPromise.catch((err) => {
+          console.warn(`[VideoTile] Play rejected for ${username}, falling back to muted:`, err);
+          setHasAutoplayBlocked(true);
+          videoEl.muted = true;
+          videoEl.play().catch(() => {});
+        });
+      }
+    },
+    [stream, username]
+  );
 
   const attachVideo = useCallback(
     (el: HTMLVideoElement | null) => {
       videoRef.current = el;
       if (el && stream) {
-        el.srcObject = stream;
-        el.play().catch(() => {});
+        playVideo(el);
       }
     },
-    [stream]
+    [stream, playVideo]
   );
 
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch(() => {});
+    const videoEl = videoRef.current;
+    if (videoEl && stream) {
+      playVideo(videoEl);
     }
-  }, [stream]);
 
-  const hasVideoTrack = stream && stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled;
-  const showVideo = hasVideoTrack && !isCameraOff;
+    if (!stream) return;
+
+    const handleTrackChange = () => {
+      setTrackTick((t) => t + 1);
+      if (videoRef.current && stream) {
+        playVideo(videoRef.current);
+      }
+    };
+
+    stream.addEventListener('addtrack', handleTrackChange);
+    stream.addEventListener('removetrack', handleTrackChange);
+    stream.getVideoTracks().forEach((track) => {
+      track.addEventListener('unmute', handleTrackChange);
+    });
+
+    return () => {
+      stream.removeEventListener('addtrack', handleTrackChange);
+      stream.removeEventListener('removetrack', handleTrackChange);
+      stream.getVideoTracks().forEach((track) => {
+        track.removeEventListener('unmute', handleTrackChange);
+      });
+    };
+  }, [stream, playVideo]);
+
+  const hasLiveVideoTrack = Boolean(
+    stream &&
+      stream.getVideoTracks().length > 0 &&
+      stream.getVideoTracks().some((t) => t.enabled && t.readyState === 'live')
+  );
+
+  const showVideo = isLocal ? !isCameraOff && hasLiveVideoTrack : hasLiveVideoTrack && !isCameraOff;
+
+  const handleUnmuteClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (videoRef.current && !isLocal) {
+      videoRef.current.muted = false;
+      videoRef.current.play().then(() => {
+        setHasAutoplayBlocked(false);
+      }).catch(() => {});
+    }
+  };
 
   return (
     <div className="relative rounded-xl overflow-hidden bg-surface-900 border border-surface-800/60 aspect-video shadow-md flex items-center justify-center">
@@ -258,15 +314,26 @@ function VideoTile({
             {getInitials(username)}
           </div>
           <span className="text-[10px] text-surface-400 truncate max-w-[80px]">
-            {isCameraOff ? 'Camera off' : 'Audio only'}
+            {isCameraOff ? 'Camera off' : 'Connecting…'}
           </span>
         </div>
       )}
+
+      {!isLocal && hasAutoplayBlocked && (
+        <button
+          onClick={handleUnmuteClick}
+          className="absolute top-1 right-1 px-1.5 py-0.5 rounded-full bg-black/80 hover:bg-black text-[9px] text-accent-amber border border-accent-amber/40 shadow flex items-center gap-0.5"
+          title="Click to unmute"
+        >
+          <span>🔇</span>
+        </button>
+      )}
+
       <div className="absolute bottom-0 inset-x-0 px-2 py-0.5 bg-gradient-to-t from-black/80 to-transparent flex items-center justify-between text-[10px] text-white">
         <span className="truncate font-medium">
           {username} {isLocal ? '(you)' : ''}
         </span>
-        {isLocal && isMuted && <span className="text-surface-400 text-[9px]">🔇</span>}
+        {isMuted && <span className="text-accent-rose text-[9px]">🔇</span>}
       </div>
     </div>
   );
