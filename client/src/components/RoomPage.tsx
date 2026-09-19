@@ -33,6 +33,7 @@ export function RoomPage() {
   const videoContainerRef = useRef<HTMLDivElement>(null);
 
   const storedUsername = localStorage.getItem('wt-username');
+  const hasJoinedRef = useRef(false);
 
   // Handle joining room on page mount / url change
   useEffect(() => {
@@ -42,6 +43,13 @@ export function RoomPage() {
     }
 
     if (state.roomId === roomId.toUpperCase()) {
+      hasJoinedRef.current = true;
+      return;
+    }
+
+    // If user previously joined this room and state.roomId became null (left or kicked), navigate home
+    if (hasJoinedRef.current && !state.roomId) {
+      navigate('/', { replace: true });
       return;
     }
 
@@ -53,6 +61,8 @@ export function RoomPage() {
         setJoining(false);
         if (!room) {
           navigate('/', { replace: true });
+        } else {
+          hasJoinedRef.current = true;
         }
       });
     } else {
@@ -62,10 +72,10 @@ export function RoomPage() {
 
   // Handle user kicked or room closed
   useEffect(() => {
-    if (state.roomId && !roomId) {
+    if (hasJoinedRef.current && !state.roomId) {
       navigate('/', { replace: true });
     }
-  }, [state.roomId, roomId, navigate]);
+  }, [state.roomId, navigate]);
 
   const handleUsernameSubmit = async (username: string) => {
     if (!roomId) return;

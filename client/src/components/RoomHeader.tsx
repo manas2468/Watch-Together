@@ -1,13 +1,23 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useRoom } from '../context/RoomContext';
 import { useSocket } from '../context/SocketContext';
 import { useWebRTCContext } from '../context/WebRTCContext';
 
 export function RoomHeader() {
+  const navigate = useNavigate();
   const { state, leaveRoom, addToast } = useRoom();
   const { socket, isReconnecting } = useSocket();
-  const { inCall, isFloating, setIsFloating, joinCall } = useWebRTCContext();
+  const { inCall, isFloating, setIsFloating, joinCall, leaveCall } = useWebRTCContext();
   const [showSettings, setShowSettings] = useState(false);
+
+  const handleLeaveRoom = () => {
+    if (inCall) {
+      leaveCall();
+    }
+    leaveRoom();
+    navigate('/', { replace: true });
+  };
 
   const copyInviteLink = () => {
     const url = `${window.location.origin}/room/${state.roomId}`;
@@ -139,7 +149,7 @@ export function RoomHeader() {
 
           {/* Leave */}
           <button
-            onClick={leaveRoom}
+            onClick={handleLeaveRoom}
             className="px-3 py-1.5 rounded-xl text-xs font-semibold text-accent-rose hover:bg-accent-rose/15 border border-accent-rose/30 transition-colors"
             aria-label="Leave room"
           >
